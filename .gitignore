@@ -1,0 +1,17 @@
+node_modules/
+client/node_modules/
+server/node_modules/
+
+client/dist/
+server/dist/
+
+*.log
+client.dev.log
+server.dev.log
+dev.log
+.dev-pids.json
+
+client/.env
+server/.env
+
+server/workspaces/

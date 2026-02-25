@@ -1,0 +1,121 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color-scheme: light dark;
+  color: rgba(255, 255, 255, 0.87);
+  background-color: #242424;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color: #213547;
+    background-color: #ffffff;
+  }
+}
+
+/* Custom Inline Tags Styles */
+.dj-node {
+  display: inline-block;
+  position: relative;
+  vertical-align: text-bottom;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  margin: 0 4px;
+}
+
+.dj-node-edit {
+  display: inline-block;
+  /* Hide the actual text but keep it editable and selectable! */
+  font-size: 0;
+  color: transparent;
+  outline: none;
+  min-width: 20px;
+}
+
+/* Show the result via ::before */
+.dj-node::before {
+  content: attr(data-result);
+  display: inline-block;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 0 6px;
+  border-radius: 4px;
+  color: white;
+  pointer-events: none; /* Let clicks pass through to the hidden editable span */
+  transition: all 0.2s;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+  white-space: nowrap;
+}
+
+/* Different colors for different types */
+.dj-var::before {
+  background: #10b981; /* green-500 */
+}
+.dj-ref::before {
+  background: #8b5cf6; /* purple-500 */
+}
+.dj-calc::before {
+  background: #f59e0b; /* amber-500 */
+}
+.dj-embed {
+  display: block;
+  margin: 12px 0;
+  padding: 16px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 14px;
+  color: #334155;
+}
+
+.dj-embed-content {
+  white-space: pre-wrap;
+}
+
+@media (prefers-color-scheme: dark) {
+  .dj-embed {
+    background: #1e293b;
+    border-color: #334155;
+    color: #e2e8f0;
+  }
+}
+
+/* When the user clicks into it, reveal the source code so they can edit */
+.dj-node-edit:focus {
+  font-size: 13px;
+  color: #1f2937;
+  background: #f3f4f6;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 2px solid #3b82f6;
+  min-width: auto;
+}
+
+/* Dark mode support for edit mode */
+@media (prefers-color-scheme: dark) {
+  .dj-node-edit:focus {
+    color: #f3f4f6;
+    background: #374151;
+  }
+}
+
+/* When editing, hide the result pill */
+.dj-node:has(.dj-node-edit:focus)::before {
+  display: none;
+}
