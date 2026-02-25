@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import type { Root } from 'react-dom/client';
@@ -9,6 +10,16 @@ import { Variable, Calculator, Link as LinkIcon, FileText } from 'lucide-react';
 // Keep track of roots to avoid memory leaks
 const roots = new WeakMap<HTMLElement, Root>();
 
+interface VditorLike {
+  getValue: () => string;
+}
+
+interface CustomRenderProps {
+  source: string;
+  currentPath: string;
+  vditor?: VditorLike;
+}
+
 function renderReact(element: HTMLElement, component: React.ReactNode) {
   let root = roots.get(element);
   if (!root) {
@@ -18,7 +29,7 @@ function renderReact(element: HTMLElement, component: React.ReactNode) {
   root.render(component);
 }
 
-const EmbedBlock: React.FC<{ source: string, currentPath: string }> = ({ source }) => {
+const EmbedBlock: React.FC<CustomRenderProps> = ({ source }) => {
   const [content, setContent] = React.useState<string>('Loading...');
 
   React.useEffect(() => {
@@ -39,7 +50,7 @@ const EmbedBlock: React.FC<{ source: string, currentPath: string }> = ({ source 
         } else {
           setContent(rawContent);
         }
-      } catch (e) {
+      } catch {
         setContent(`*[Error: Failed to embed ${targetPath}]*`);
       }
     };
@@ -59,7 +70,7 @@ const EmbedBlock: React.FC<{ source: string, currentPath: string }> = ({ source 
   );
 };
 
-const VarBlock: React.FC<{ source: string }> = ({ source }) => {
+const VarBlock: React.FC<CustomRenderProps> = ({ source }) => {
   const lines = source.split('\n').filter(l => l.trim());
   
   return (
@@ -88,13 +99,13 @@ const VarBlock: React.FC<{ source: string }> = ({ source }) => {
   );
 };
 
-const CalcBlock: React.FC<{ source: string, currentPath: string, vditor: any }> = ({ source, currentPath, vditor }) => {
+const CalcBlock: React.FC<CustomRenderProps> = ({ source, currentPath, vditor }) => {
   const [result, setResult] = React.useState<string>('Computing...');
 
   React.useEffect(() => {
     const compute = async () => {
       // 1. Get current file content from Vditor
-      const currentContent = vditor.getValue();
+      const currentContent = vditor?.getValue() ?? '';
       const localVars = MarkdownParser.parseVariables(currentContent);
       
       const varMap = new Map<string, string>();
@@ -116,7 +127,9 @@ const CalcBlock: React.FC<{ source: string, currentPath: string, vditor: any }> 
                // Make it available under both full path and simple name if no collision
                varMap.set(ref.varName, found.value);
             }
-          } catch(e) {}
+          } catch {
+            continue;
+          }
         }
       }
 
@@ -128,7 +141,7 @@ const CalcBlock: React.FC<{ source: string, currentPath: string, vditor: any }> 
       try {
         const res = new Function('return ' + expr)();
         setResult(String(res));
-      } catch(e) {
+      } catch {
         setResult(`Error: ${expr}`);
       }
     };
@@ -148,7 +161,7 @@ const CalcBlock: React.FC<{ source: string, currentPath: string, vditor: any }> 
   );
 };
 
-const RefBlock: React.FC<{ source: string, currentPath: string }> = ({ source, currentPath }) => {
+const RefBlock: React.FC<CustomRenderProps> = ({ source, currentPath }) => {
   const [val, setVal] = React.useState<string>('...');
 
   React.useEffect(() => {
@@ -170,7 +183,7 @@ const RefBlock: React.FC<{ source: string, currentPath: string }> = ({ source, c
         } else {
           setVal(`Not found: ${varName}`);
         }
-      } catch (e) {
+      } catch {
         setVal('File error');
       }
     };
@@ -191,7 +204,8 @@ const RefBlock: React.FC<{ source: string, currentPath: string }> = ({ source, c
 };
 
 export const getCustomRenders = (pathRef: { current: string }) => {
-  const handleRender = (Component: React.FC<any>) => (element: HTMLElement, vditor: any) => {
+  const handleRender =
+    (Component: React.FC<CustomRenderProps>) => (element: HTMLElement, vditor: VditorLike) => {
     const codeElements = element.querySelectorAll(`code.language-${Component.name.replace('Block', '').toLowerCase()}`);
     
     codeElements.forEach((el) => {

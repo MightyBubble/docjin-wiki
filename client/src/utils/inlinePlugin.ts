@@ -234,7 +234,7 @@ export class InlineTagPlugin {
           // but that would mutate the innerHTML. Since we just injected it, it's safe.
           this.processNodesSync(container, depth + 1);
 
-      } catch (e) {
+      } catch {
           container.innerHTML = `<span class="text-red-500 italic">Error loading embed: ${path}</span>`;
       }
   }
@@ -339,7 +339,9 @@ export class InlineTagPlugin {
                 if (found) {
                    return `鈫?${found.value}`;
                 }
-             } catch(e) {}
+             } catch {
+                return `鈫??`;
+             }
              return `鈫??`;
           }
       }
@@ -352,7 +354,7 @@ export class InlineTagPlugin {
           try {
               const res = new Function('return ' + expr)();
               return `鈭?${res}`;
-          } catch (e) {
+          } catch {
               return 'calc error';
           }
       }

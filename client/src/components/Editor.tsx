@@ -90,7 +90,11 @@ export const Editor: React.FC<EditorProps> = ({ file, onChange, workspaceId }) =
       if (pluginRef.current) {
           pluginRef.current.destroy();
       }
-      try { vditorInstance.destroy(); } catch(e) {}
+      try {
+        vditorInstance.destroy();
+      } catch {
+        // Ignore destroy errors on fast teardown.
+      }
       setVditor(undefined);
     };
   }, []);
