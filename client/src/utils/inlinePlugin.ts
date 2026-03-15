@@ -164,7 +164,34 @@ export class InlineTagPlugin {
     }, 0);
   }
 
+  private isolateEditorInput(inputNode: HTMLElement) {
+    const stopPropagation = (event: Event) => {
+      event.stopPropagation();
+    };
+
+    const eventTypes = [
+      'mouseup',
+      'dblclick',
+      'focusin',
+      'focusout',
+      'keyup',
+      'beforeinput',
+      'paste',
+      'copy',
+      'cut',
+      'compositionstart',
+      'compositionend',
+      'selectstart',
+    ];
+
+    for (const eventType of eventTypes) {
+      inputNode.addEventListener(eventType, stopPropagation);
+    }
+  }
+
   private bindNodeEditing(span: HTMLElement, editNode: HTMLElement) {
+    this.isolateEditorInput(editNode);
+
     span.addEventListener('mousedown', (event) => {
       if (event.target === editNode) {
         return;
@@ -209,7 +236,8 @@ export class InlineTagPlugin {
       event.stopPropagation();
     });
 
-    editNode.addEventListener('blur', () => {
+    editNode.addEventListener('blur', (event) => {
+      event.stopPropagation();
       this.finishNodeEditing(span, editNode);
     });
   }
@@ -603,6 +631,7 @@ export class InlineTagPlugin {
       editDiv.type = 'text';
       editDiv.spellcheck = false;
       editDiv.disabled = !editable;
+      this.isolateEditorInput(editDiv);
       this.setEmbedEditorValue(editDiv, raw);
 
       const suggestionsDiv = document.createElement('div');
@@ -668,16 +697,27 @@ export class InlineTagPlugin {
               beginEditing();
           });
 
-          editDiv.addEventListener('focus', () => {
+          editDiv.addEventListener('mousedown', (event) => {
+              event.stopPropagation();
+          });
+
+          editDiv.addEventListener('click', (event) => {
+              event.stopPropagation();
+          });
+
+          editDiv.addEventListener('focus', (event) => {
+              event.stopPropagation();
               embedDiv.setAttribute('data-editing', 'true');
               refreshSuggestions();
           });
 
-          editDiv.addEventListener('input', () => {
+          editDiv.addEventListener('input', (event) => {
+              event.stopPropagation();
               refreshSuggestions();
           });
 
           editDiv.addEventListener('keydown', (event) => {
+              event.stopPropagation();
               if (event.key === 'Escape') {
                   event.preventDefault();
                   embedDiv.setAttribute('data-editing', 'false');
@@ -724,6 +764,9 @@ export class InlineTagPlugin {
                       this.setEmbedEditorValue(editDiv, nextRaw);
                       suggestionState = this.getEmbedSuggestions(nextRaw);
                       this.renderEmbedSuggestions(nextRaw, suggestionsDiv, suggestionState, pickSuggestion);
+                      if (nextRaw === this.normalizeRawText(this.getEmbedEditorValue(editDiv))) {
+                          editDiv.blur();
+                      }
                       return;
                   }
 
@@ -732,7 +775,8 @@ export class InlineTagPlugin {
               }
           });
 
-          editDiv.addEventListener('blur', () => {
+          editDiv.addEventListener('blur', (event) => {
+              event.stopPropagation();
               blurTimer = window.setTimeout(() => {
                   commitEditing();
               }, 120);
