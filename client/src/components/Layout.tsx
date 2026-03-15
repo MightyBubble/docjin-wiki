@@ -1,10 +1,58 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Sidebar } from './Sidebar';
-import { Editor } from './Editor';
 import { RightPanel } from './RightPanel';
 import { Header } from './Header';
-import type { FileNode, GitStatus, WorkspaceInfo } from '../types';
-import { fileService, gitService, workspaceService } from '../services/api';
+import type { FileNode, GitStatus, WorkspaceInfo, MountInfo, FileFocusTarget } from '../types';
+import { fileService, gitService, workspaceService, mountService } from '../services/api';
+
+const Editor = lazy(async () => {
+  const module = await import('./Editor');
+  return { default: module.Editor };
+});
+
+const findFileNodeByPath = (nodes: FileNode[], targetPath: string): FileNode | null => {
+  for (const node of nodes) {
+    if (node.type === 'file' && node.path === targetPath) {
+      return node;
+    }
+
+    if (node.children?.length) {
+      const match = findFileNodeByPath(node.children, targetPath);
+      if (match) {
+        return match;
+      }
+    }
+  }
+
+  return null;
+};
+
+const collectFilePaths = (nodes: FileNode[]): string[] => {
+  const paths: string[] = [];
+
+  for (const node of nodes) {
+    if (node.type === 'file') {
+      paths.push(node.path);
+    }
+
+    if (node.children?.length) {
+      paths.push(...collectFilePaths(node.children));
+    }
+  }
+
+  return paths;
+};
+
+const getApiErrorMessage = (error: unknown, fallback: string): string => {
+  if (typeof error === 'object' && error !== null) {
+    const response = (error as { response?: { data?: { error?: string } } }).response;
+    if (typeof response?.data?.error === 'string' && response.data.error.trim()) {
+      return response.data.error;
+    }
+  }
+
+  return fallback;
+};
 
 export const Layout: React.FC = () => {
   const [files, setFiles] = useState<FileNode[]>([]);
@@ -15,7 +63,11 @@ export const Layout: React.FC = () => {
   const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
   const [unsavedChanges, setUnsavedChanges] = useState(false);
   const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
+  const [, setMounts] = useState<MountInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [focusTarget, setFocusTarget] = useState<FileFocusTarget | null>(null);
+  const focusTokenRef = useRef(0);
+  const availableFilePaths = useMemo(() => collectFilePaths(files), [files]);
 
   const refreshFiles = useCallback(async (workspaceId: string) => {
     try {
@@ -37,6 +89,16 @@ export const Layout: React.FC = () => {
     }
   }, []);
 
+  const refreshMounts = useCallback(async (workspaceId: string) => {
+    try {
+      const data = await mountService.getMounts(workspaceId);
+      setMounts(data);
+    } catch (error) {
+      console.error('Failed to fetch mounts:', error);
+      setMounts([]);
+    }
+  }, []);
+
   const refreshWorkspaces = useCallback(async (): Promise<WorkspaceInfo[]> => {
     const payload = await workspaceService.getWorkspaces();
     setWorkspaces(payload.workspaces);
@@ -45,9 +107,9 @@ export const Layout: React.FC = () => {
 
   const loadWorkspaceData = useCallback(
     async (workspaceId: string) => {
-      await Promise.all([refreshFiles(workspaceId), refreshGitStatus(workspaceId)]);
+      await Promise.all([refreshFiles(workspaceId), refreshGitStatus(workspaceId), refreshMounts(workspaceId)]);
     },
-    [refreshFiles, refreshGitStatus]
+    [refreshFiles, refreshGitStatus, refreshMounts]
   );
 
   useEffect(() => {
@@ -126,7 +188,7 @@ export const Layout: React.FC = () => {
     }
   };
 
-  const handleFileSelect = async (file: FileNode) => {
+  const openFile = useCallback(async (file: FileNode, focus?: { heading?: string }) => {
     if (!currentWorkspaceId) return;
 
     if (unsavedChanges) {
@@ -139,11 +201,45 @@ export const Layout: React.FC = () => {
       const content = await fileService.readFile(file.path, currentWorkspaceId);
       setCurrentFile({ ...file, content });
       setUnsavedChanges(false);
+      if (focus) {
+        focusTokenRef.current += 1;
+        setFocusTarget({
+          path: file.path,
+          heading: focus.heading,
+          token: focusTokenRef.current,
+        });
+      } else {
+        setFocusTarget(null);
+      }
     } catch (error) {
       console.error('Failed to read file:', error);
       alert('Failed to read file content');
     }
-  };
+  }, [currentWorkspaceId, unsavedChanges]);
+
+  const handleFileSelect = useCallback(async (file: FileNode) => {
+    await openFile(file);
+  }, [openFile]);
+
+  const handleEmbedNavigate = useCallback(async (path: string, heading?: string) => {
+    const targetFile = findFileNodeByPath(files, path);
+    if (!targetFile) {
+      alert(`Embedded source not found: ${path}`);
+      return;
+    }
+
+    await openFile(targetFile, { heading });
+  }, [files, openFile]);
+
+  const handleSearchSelect = useCallback(async (path: string, heading?: string) => {
+    const targetFile = findFileNodeByPath(files, path);
+    if (!targetFile) {
+      alert(`Search result source not found: ${path}`);
+      return;
+    }
+
+    await openFile(targetFile, { heading });
+  }, [files, openFile]);
 
   const handleContentChange = (content: string) => {
     if (!currentFile) return;
@@ -188,6 +284,28 @@ export const Layout: React.FC = () => {
     }
   };
 
+  const handleAddMount = async (alias: string, mountPath: string) => {
+    if (!currentWorkspaceId) return;
+    try {
+      const updated = await mountService.addMount(alias, mountPath, currentWorkspaceId);
+      setMounts(updated);
+      await refreshFiles(currentWorkspaceId);
+    } catch (error: unknown) {
+      alert(getApiErrorMessage(error, 'Failed to add mount'));
+    }
+  };
+
+  const handleRemoveMount = async (alias: string) => {
+    if (!currentWorkspaceId) return;
+    try {
+      const updated = await mountService.removeMount(alias, currentWorkspaceId);
+      setMounts(updated);
+      await refreshFiles(currentWorkspaceId);
+    } catch (error: unknown) {
+      alert(getApiErrorMessage(error, 'Failed to remove mount'));
+    }
+  };
+
   return (
     <div className="flex flex-col h-screen bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 overflow-hidden">
       <Header
@@ -217,6 +335,9 @@ export const Layout: React.FC = () => {
               refreshFiles(currentWorkspaceId);
             }
           }}
+          onAddMount={handleAddMount}
+          onRemoveMount={handleRemoveMount}
+          onSearchSelect={handleSearchSelect}
         />
         
         <main className="flex-1 flex flex-col min-w-0 bg-white dark:bg-gray-900 relative z-0">
@@ -225,11 +346,16 @@ export const Layout: React.FC = () => {
             ) : !currentWorkspaceId ? (
                 <div className="flex items-center justify-center h-full text-gray-500">No workspace available</div>
             ) : (
-                <Editor
-                    file={currentFile}
-                    onChange={handleContentChange}
-                    workspaceId={currentWorkspaceId}
-                />
+                <Suspense fallback={<div className="flex items-center justify-center h-full text-gray-500">Loading editor...</div>}>
+                  <Editor
+                      file={currentFile}
+                      onChange={handleContentChange}
+                      workspaceId={currentWorkspaceId}
+                      focusTarget={focusTarget}
+                      onEmbedNavigate={handleEmbedNavigate}
+                      availableFilePaths={availableFilePaths}
+                  />
+                </Suspense>
             )}
         </main>
 

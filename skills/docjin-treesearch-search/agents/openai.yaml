@@ -1,0 +1,4 @@
+interface:
+  display_name: "Docjin TreeSearch"
+  short_description: "Integrate real TreeSearch into Docjin with full search APIs."
+  default_prompt: "Use $docjin-treesearch-search to implement or extend real TreeSearch APIs for Docjin."

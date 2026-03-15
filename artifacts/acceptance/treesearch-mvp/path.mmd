@@ -1,0 +1,19 @@
+flowchart TD
+    A["Client or operator"] --> B["DELETE /api/search/index"]
+    B --> C["POST /api/search/index/build"]
+    C --> D["server/src/treeSearchService.ts index manager"]
+    D --> E["server/scripts/treesearch_query.py build"]
+    E --> F["Real pytreesearch TreeSearch"]
+    F --> G["Persisted index.db + staged files"]
+
+    G --> H["GET /api/search/index/status|files|config"]
+    G --> I["GET /api/search/tree"]
+    I --> J["server/scripts/treesearch_query.py search"]
+    J --> K["Structured hits"]
+    K --> L["Sidebar result list"]
+    L --> M["Layout.openFile(path, heading)"]
+    M --> N["Editor focus target highlight"]
+
+    I --> O["query = 不存在的技能树术语"]
+    O --> P["Guardrail filters flatNodes"]
+    P --> Q["0 documents / 0 nodes"]

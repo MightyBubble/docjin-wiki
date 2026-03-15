@@ -1,9 +1,22 @@
 import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
-import { FileManager } from './fileManager';
+import fs from 'fs';
+import path from 'path';
+import { execSync } from 'child_process';
 import { GitManager } from './gitManager';
 import { serverConfig } from './config';
 import { WorkspaceManager } from './workspaceManager';
+import { MountManager } from './mountManager';
+import { MultiRootFileManager } from './multiRootFileManager';
+import {
+  buildWorkspaceTreeSearchIndex,
+  clearWorkspaceTreeSearchIndex,
+  getTreeSearchConfig,
+  getTreeSearchIndexedFiles,
+  getTreeSearchIndexStatus,
+  refreshWorkspaceTreeSearchIndex,
+  searchWorkspaceWithTreeSearch,
+} from './treeSearchService';
 
 const app = express();
 const workspaceManager = new WorkspaceManager(
@@ -11,6 +24,7 @@ const workspaceManager = new WorkspaceManager(
   serverConfig.defaultWorkspaceId,
   serverConfig.templateDataDir
 );
+const mountManager = new MountManager(serverConfig.workspacesRoot);
 
 const corsOrigin =
   serverConfig.corsOrigins.length === 0 || serverConfig.corsOrigins.includes('*')
@@ -41,17 +55,56 @@ function getWorkspaceIdFromRequest(req: Request): string {
 function getManagers(req: Request): {
   workspaceId: string;
   workspacePath: string;
-  fileManager: FileManager;
+  mounts: ReturnType<MountManager['getMounts']>;
+  fileManager: MultiRootFileManager;
   gitManager: GitManager;
 } {
   const workspaceId = getWorkspaceIdFromRequest(req);
   const workspace = workspaceManager.getWorkspace(workspaceId);
+  const mounts = mountManager.getMounts(workspaceId);
   return {
     workspaceId: workspace.id,
     workspacePath: workspace.path,
-    fileManager: new FileManager(workspace.path),
+    mounts,
+    fileManager: new MultiRootFileManager(workspace.path, mounts),
     gitManager: new GitManager(workspace.path),
   };
+}
+
+function parsePositiveInt(value: unknown, fallback: number): number {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return fallback;
+  }
+
+  return parsed;
+}
+
+function parseBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+}
+
+function parseString(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+  const trimmed = value.trim();
+  return trimmed || fallback;
 }
 
 function toHttpError(error: unknown): { code: number; message: string } {
@@ -59,11 +112,16 @@ function toHttpError(error: unknown): { code: number; message: string } {
   if (
     message.includes('Invalid workspace id') ||
     message.includes('Invalid workspace path') ||
-    message.includes('Invalid path')
+    message.includes('Invalid path') ||
+    message.includes('Invalid mount alias') ||
+    message.includes('Mount path must be absolute') ||
+    message.includes('already exists') ||
+    message.includes('already mounted') ||
+    message.includes('Cannot rename across mounts')
   ) {
     return { code: 400, message };
   }
-  if (message.includes('does not exist') || message.includes('not found')) {
+  if (message.includes('does not exist') || message.includes('not found') || message.includes('unavailable')) {
     return { code: 404, message };
   }
   return { code: 500, message };
@@ -108,6 +166,53 @@ app.post('/api/workspaces', (req: Request, res: Response) => {
   }
 });
 
+// --- Mount APIs ---
+
+app.get('/api/mounts', (req: Request, res: Response) => {
+  try {
+    const workspaceId = getWorkspaceIdFromRequest(req);
+    const mounts = mountManager.getMounts(workspaceId);
+    res.json({ mounts });
+  } catch (error) {
+    const httpError = toHttpError(error);
+    res.status(httpError.code).json({ error: httpError.message });
+  }
+});
+
+app.post('/api/mounts', (req: Request, res: Response) => {
+  const { alias, path: mountPath } = req.body;
+  if (!alias || !mountPath) {
+    res.status(400).json({ error: 'alias and path are required' });
+    return;
+  }
+
+  try {
+    const workspaceId = getWorkspaceIdFromRequest(req);
+    const mounts = mountManager.addMount(workspaceId, alias, mountPath);
+    res.status(201).json({ mounts });
+  } catch (error) {
+    const httpError = toHttpError(error);
+    res.status(httpError.code).json({ error: httpError.message });
+  }
+});
+
+app.delete('/api/mounts', (req: Request, res: Response) => {
+  const { alias } = req.body;
+  if (!alias) {
+    res.status(400).json({ error: 'alias is required' });
+    return;
+  }
+
+  try {
+    const workspaceId = getWorkspaceIdFromRequest(req);
+    const mounts = mountManager.removeMount(workspaceId, alias);
+    res.json({ mounts });
+  } catch (error) {
+    const httpError = toHttpError(error);
+    res.status(httpError.code).json({ error: httpError.message });
+  }
+});
+
 // --- File APIs ---
 
 app.get('/api/files', (req: Request, res: Response) => {
@@ -132,6 +237,107 @@ app.get('/api/files/read', (req: Request, res: Response) => {
     const { fileManager } = getManagers(req);
     const content = fileManager.readFile(filePath);
     res.json({ content });
+  } catch (error) {
+    const httpError = toHttpError(error);
+    res.status(httpError.code).json({ error: httpError.message });
+  }
+});
+
+// --- Search APIs ---
+
+app.get('/api/search/tree', async (req: Request, res: Response) => {
+  const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  if (!query) {
+    res.status(400).json({ error: 'q parameter is required' });
+    return;
+  }
+
+  try {
+    const { workspacePath, mounts } = getManagers(req);
+    const result = await searchWorkspaceWithTreeSearch({
+      query,
+      workspacePath,
+      mounts,
+      topKDocs: parsePositiveInt(req.query.topKDocs, 8),
+      maxNodesPerDoc: parsePositiveInt(req.query.maxNodesPerDoc, 3),
+      includeAncestors: parseBoolean(req.query.includeAncestors, true),
+      textMode: parseString(req.query.textMode, 'summary'),
+      mergeStrategy: parseString(req.query.mergeStrategy, 'interleave'),
+      autoBuild: parseBoolean(req.query.autoBuild, true),
+      rebuild: parseBoolean(req.query.rebuild, false),
+    });
+
+    res.json(result);
+  } catch (error) {
+    const httpError = toHttpError(error);
+    res.status(httpError.code).json({ error: httpError.message });
+  }
+});
+
+app.get('/api/search/index/status', (req: Request, res: Response) => {
+  try {
+    const { workspacePath, mounts } = getManagers(req);
+    res.json(getTreeSearchIndexStatus(workspacePath, mounts));
+  } catch (error) {
+    const httpError = toHttpError(error);
+    res.status(httpError.code).json({ error: httpError.message });
+  }
+});
+
+app.get('/api/search/index/files', (req: Request, res: Response) => {
+  try {
+    const { workspacePath } = getManagers(req);
+    res.json({ files: getTreeSearchIndexedFiles(workspacePath) });
+  } catch (error) {
+    const httpError = toHttpError(error);
+    res.status(httpError.code).json({ error: httpError.message });
+  }
+});
+
+app.get('/api/search/index/config', (req: Request, res: Response) => {
+  try {
+    const { workspacePath, mounts } = getManagers(req);
+    res.json({
+      ...getTreeSearchConfig(),
+      index: getTreeSearchIndexStatus(workspacePath, mounts),
+    });
+  } catch (error) {
+    const httpError = toHttpError(error);
+    res.status(httpError.code).json({ error: httpError.message });
+  }
+});
+
+app.post('/api/search/index/build', async (req: Request, res: Response) => {
+  try {
+    const { workspacePath, mounts } = getManagers(req);
+    const status = await buildWorkspaceTreeSearchIndex(
+      workspacePath,
+      mounts,
+      req.body && typeof req.body.force === 'boolean' ? req.body.force : true
+    );
+    res.status(201).json({ status });
+  } catch (error) {
+    const httpError = toHttpError(error);
+    res.status(httpError.code).json({ error: httpError.message });
+  }
+});
+
+app.post('/api/search/index/refresh', async (req: Request, res: Response) => {
+  try {
+    const { workspacePath, mounts } = getManagers(req);
+    const status = await refreshWorkspaceTreeSearchIndex(workspacePath, mounts);
+    res.json({ status });
+  } catch (error) {
+    const httpError = toHttpError(error);
+    res.status(httpError.code).json({ error: httpError.message });
+  }
+});
+
+app.delete('/api/search/index', (req: Request, res: Response) => {
+  try {
+    const { workspacePath } = getManagers(req);
+    clearWorkspaceTreeSearchIndex(workspacePath);
+    res.json({ success: true });
   } catch (error) {
     const httpError = toHttpError(error);
     res.status(httpError.code).json({ error: httpError.message });
@@ -242,6 +448,100 @@ app.post('/api/git/commit', async (req: Request, res: Response) => {
   } catch (error) {
     const httpError = toHttpError(error);
     res.status(httpError.code).json({ error: httpError.message });
+  }
+});
+
+// --- Directory browsing API ---
+
+const HIDDEN_DIRS = new Set([
+  '$Recycle.Bin', 'System Volume Information', '$WINDOWS.~BT', '$WinREAgent',
+  'Recovery', 'PerfLogs', 'Config.Msi', 'Documents and Settings',
+]);
+
+function getWindowsDrives(): { name: string; path: string }[] {
+  try {
+    const output = execSync('wmic logicaldisk get name', { encoding: 'utf-8' });
+    const drives: { name: string; path: string }[] = [];
+    for (const line of output.split('\n')) {
+      const trimmed = line.trim();
+      if (/^[A-Z]:$/.test(trimmed)) {
+        drives.push({ name: trimmed + '\\', path: trimmed + '\\' });
+      }
+    }
+    return drives;
+  } catch {
+    return [{ name: 'C:\\', path: 'C:\\' }];
+  }
+}
+
+app.get('/api/browse-dirs', (req: Request, res: Response) => {
+  const dirPath = typeof req.query.path === 'string' ? req.query.path : '';
+
+  // No path → return drive letters (Windows)
+  if (!dirPath) {
+    const drives = getWindowsDrives();
+    res.json({ current: '', parent: null, dirs: drives });
+    return;
+  }
+
+  const resolved = path.resolve(dirPath);
+
+  if (!fs.existsSync(resolved)) {
+    res.status(404).json({ error: 'Path does not exist' });
+    return;
+  }
+
+  if (!fs.statSync(resolved).isDirectory()) {
+    res.status(400).json({ error: 'Path is not a directory' });
+    return;
+  }
+
+  try {
+    const entries = fs.readdirSync(resolved, { withFileTypes: true });
+    const dirs: { name: string; path: string }[] = [];
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name.startsWith('.')) continue;
+      if (HIDDEN_DIRS.has(entry.name)) continue;
+      dirs.push({
+        name: entry.name,
+        path: path.join(resolved, entry.name),
+      });
+    }
+
+    dirs.sort((a, b) => a.name.localeCompare(b.name));
+
+    const parsed = path.parse(resolved);
+    const parent = parsed.root === resolved ? null : path.dirname(resolved);
+
+    res.json({ current: resolved, parent, dirs });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: message });
+  }
+});
+
+app.post('/api/browse-dirs/mkdir', (req: Request, res: Response) => {
+  const { path: dirPath } = req.body;
+  if (!dirPath || typeof dirPath !== 'string') {
+    res.status(400).json({ error: 'path is required' });
+    return;
+  }
+
+  const resolved = path.resolve(dirPath);
+
+  if (fs.existsSync(resolved)) {
+    res.status(400).json({ error: 'Directory already exists' });
+    return;
+  }
+
+  try {
+    fs.mkdirSync(resolved, { recursive: true });
+    res.status(201).json({ path: resolved });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: message });
   }
 });
 

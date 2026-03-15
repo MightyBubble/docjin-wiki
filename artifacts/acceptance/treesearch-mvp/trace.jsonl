@@ -1,0 +1,6 @@
+{"step":1,"kind":"http_delete","endpoint":"DELETE /api/search/index","workspace":"default","success":true}
+{"step":2,"kind":"http_build","endpoint":"POST /api/search/index/build","workspace":"default","exists":true,"dirty":false,"indexedCount":12}
+{"step":3,"kind":"http_status","endpoint":"GET /api/search/index/status","workspace":"default","exists":true,"dirty":false,"sourceCount":12,"indexedCount":12}
+{"step":4,"kind":"http_query","endpoint":"GET /api/search/tree","query":"战士 基础攻击","workspace":"default","topKDocs":5,"maxNodesPerDoc":3,"totalDocuments":3,"totalNodes":6,"topHit":{"path":"Demo/CombatSystem.md","title":"战士 (Warrior) 的属性","lineStart":9,"lineEnd":15,"score":1.0}}
+{"step":5,"kind":"http_refresh","endpoint":"POST /api/search/index/refresh","workspace":"default","exists":true,"dirty":false,"indexedCount":12}
+{"step":6,"kind":"http_query","endpoint":"GET /api/search/tree","query":"不存在的技能树术语","workspace":"default","topKDocs":5,"maxNodesPerDoc":3,"totalDocuments":0,"totalNodes":0,"topHit":null}
