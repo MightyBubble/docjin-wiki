@@ -1,21 +1,43 @@
-﻿import { MarkdownParser } from './markdownParser';
+﻿﻿import { MarkdownParser } from './markdownParser';
 import { fileService } from '../services/api';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
+
+interface InlineNodeDisplay {
+  label: string;
+  value: string;
+}
+
+interface EmbedSuggestionState {
+  suggestions: string[];
+  selectedIndex: number;
+}
 
 export class InlineTagPlugin {
   private editorElement: HTMLElement;
   private currentPath: string;
   private currentWorkspace: string;
+  private onEmbedNavigate: (path: string, heading?: string) => void;
+  private availableFilePaths: string[];
   private observer: MutationObserver | null = null;
+  private pollTimer: number | null = null;
   private isProcessing = false;
+  private hasPendingProcess = false;
   // Use a map to track variable definitions found in the current document pass
   private globalVarMap = new Map<string, string>();
 
-  constructor(editorElement: HTMLElement, currentPath: string, currentWorkspace: string) {
+  constructor(
+    editorElement: HTMLElement,
+    currentPath: string,
+    currentWorkspace: string,
+    onEmbedNavigate: (path: string, heading?: string) => void,
+    availableFilePaths: string[]
+  ) {
     this.editorElement = editorElement;
     this.currentPath = currentPath;
     this.currentWorkspace = currentWorkspace;
+    this.onEmbedNavigate = onEmbedNavigate;
+    this.availableFilePaths = availableFilePaths;
   }
 
   public init(): boolean {
@@ -27,23 +49,35 @@ export class InlineTagPlugin {
     if (!wysiwyg) return false;
 
     this.observer = new MutationObserver(() => {
-      if (this.isProcessing) return;
+      if (this.isProcessing) {
+        this.hasPendingProcess = true;
+        return;
+      }
       this.processDocument();
     });
 
-    this.observer.observe(wysiwyg, {
+    this.observer.observe(this.editorElement, {
       characterData: true,
       childList: true,
       subtree: true
     });
 
     this.processDocument();
+    this.pollTimer = window.setInterval(() => {
+      if (!this.isProcessing) {
+        this.processDocument();
+      }
+    }, 500);
     return true;
   }
 
   public destroy() {
     if (this.observer) {
       this.observer.disconnect();
+    }
+    if (this.pollTimer !== null) {
+      window.clearInterval(this.pollTimer);
+      this.pollTimer = null;
     }
   }
 
@@ -57,6 +91,205 @@ export class InlineTagPlugin {
     this.processDocument();
   }
 
+  public updateAvailableFilePaths(newPaths: string[]) {
+    this.availableFilePaths = newPaths;
+  }
+
+  public refresh() {
+    if (this.isProcessing) {
+      this.hasPendingProcess = true;
+      return;
+    }
+    this.processDocument();
+  }
+
+  private getNodeEditorValue(editNode: HTMLElement): string {
+    if (editNode instanceof HTMLInputElement) {
+      return editNode.value;
+    }
+
+    return editNode.textContent || '';
+  }
+
+  private setNodeEditorValue(editNode: HTMLElement, value: string) {
+    if (editNode instanceof HTMLInputElement) {
+      editNode.value = value;
+      editNode.setAttribute('value', value);
+      return;
+    }
+
+    editNode.textContent = value;
+  }
+
+  private focusEditableNode(editNode: HTMLElement) {
+    window.setTimeout(() => {
+      editNode.focus();
+
+      if (editNode instanceof HTMLInputElement) {
+        const length = editNode.value.length;
+        editNode.setSelectionRange(length, length);
+        return;
+      }
+
+      const selection = window.getSelection();
+      if (!selection) {
+        return;
+      }
+
+      const range = document.createRange();
+      range.selectNodeContents(editNode);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }, 0);
+  }
+
+  private beginNodeEditing(span: HTMLElement, editNode: HTMLElement) {
+    span.setAttribute('data-editing', 'true');
+    span.setAttribute('contenteditable', 'false');
+    this.setNodeEditorValue(editNode, span.getAttribute('data-raw') || this.getNodeEditorValue(editNode));
+    this.focusEditableNode(editNode);
+  }
+
+  private finishNodeEditing(span: HTMLElement, editNode: HTMLElement, options?: { revert?: boolean }) {
+    if (options?.revert) {
+      this.setNodeEditorValue(editNode, span.getAttribute('data-raw') || '');
+    }
+
+    span.setAttribute('data-editing', 'false');
+    span.setAttribute('contenteditable', 'false');
+
+    window.setTimeout(() => {
+      this.refresh();
+    }, 0);
+  }
+
+  private bindNodeEditing(span: HTMLElement, editNode: HTMLElement) {
+    span.addEventListener('mousedown', (event) => {
+      if (event.target === editNode) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      this.beginNodeEditing(span, editNode);
+    });
+
+    editNode.addEventListener('mousedown', (event) => {
+      event.stopPropagation();
+    });
+
+    editNode.addEventListener('focus', (event) => {
+      event.stopPropagation();
+      span.setAttribute('data-editing', 'true');
+    });
+
+    editNode.addEventListener('click', (event) => {
+      event.stopPropagation();
+    });
+
+    editNode.addEventListener('keydown', (event) => {
+      event.stopPropagation();
+
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        this.finishNodeEditing(span, editNode, { revert: true });
+        editNode.blur();
+        return;
+      }
+
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        this.finishNodeEditing(span, editNode);
+        editNode.blur();
+      }
+    });
+
+    editNode.addEventListener('input', (event) => {
+      event.stopPropagation();
+    });
+
+    editNode.addEventListener('blur', () => {
+      this.finishNodeEditing(span, editNode);
+    });
+  }
+
+  private applyNodeDisplay(node: HTMLElement, display: InlineNodeDisplay) {
+    node.setAttribute('data-has-label', display.label ? 'true' : 'false');
+    node.setAttribute('data-label', display.label);
+    node.setAttribute('data-value', display.value);
+    node.setAttribute('data-result', display.label ? `${display.label} ${display.value}` : display.value);
+  }
+
+  private normalizeRawText(value: string): string {
+    return value.replace(/[\u00a0\u200b\ufeff]/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  private getEmbedEditorValue(editNode: HTMLElement): string {
+    if (editNode instanceof HTMLInputElement) {
+      return editNode.value;
+    }
+
+    return editNode.textContent || '';
+  }
+
+  private setEmbedEditorValue(editNode: HTMLElement, value: string) {
+    if (editNode instanceof HTMLInputElement) {
+      editNode.value = value;
+      editNode.setAttribute('value', value);
+      return;
+    }
+
+    editNode.textContent = value;
+  }
+
+  private focusEmbedEditor(editNode: HTMLElement) {
+    window.setTimeout(() => {
+      editNode.focus();
+
+      if (editNode instanceof HTMLInputElement) {
+        const length = editNode.value.length;
+        editNode.setSelectionRange(length, length);
+      }
+    }, 0);
+  }
+
+  private parseEmbedPath(rawText: string): string | null {
+    const match = rawText.match(/^\{\{embed:\s*([^}]+)\}\}$/);
+    return match ? match[1].trim() : null;
+  }
+
+  private getEmbedSuggestions(rawText: string): EmbedSuggestionState {
+    const match = rawText.match(/^\{\{embed:\s*([^#}]*)/);
+    const partialPath = match ? match[1].trim().toLowerCase() : '';
+
+    if (!partialPath) {
+      return {
+        suggestions: this.availableFilePaths.slice(0, 8),
+        selectedIndex: 0,
+      };
+    }
+
+    const suggestions = this.availableFilePaths
+      .filter((path) => path.toLowerCase().includes(partialPath))
+      .slice(0, 8);
+
+    return {
+      suggestions,
+      selectedIndex: suggestions.length > 0 ? 0 : -1,
+    };
+  }
+
+  private applyEmbedSuggestion(rawText: string, selectedPath: string): string {
+    const match = rawText.match(/^\{\{embed:\s*([^#}]*)?(#[^}]*)?\}\}$/);
+    if (!match) {
+      return `{{embed: ${selectedPath}}}`;
+    }
+
+    const anchor = match[2] || '';
+    return `{{embed: ${selectedPath}${anchor}}}`;
+  }
+
   private async processDocument() {
     this.isProcessing = true;
     try {
@@ -65,6 +298,18 @@ export class InlineTagPlugin {
 
       // 1. Pre-scan ALL vars from the DOM text to build global map
       this.globalVarMap.clear();
+      const existingVarNodes = Array.from(wysiwyg.querySelectorAll('.dj-node[data-type="var"]')) as HTMLElement[];
+      for (const varNode of existingVarNodes) {
+        const editNode = varNode.querySelector('.dj-node-edit') as HTMLElement | null;
+        const rawVarText = this.normalizeRawText(
+          editNode ? this.getNodeEditorValue(editNode) : (varNode.getAttribute('data-raw') || '')
+        );
+        const match = rawVarText.match(/^\{\{var:\s*([^=}]+)=([^}]+)\}\}$/);
+        if (match) {
+          this.globalVarMap.set(match[1].trim(), match[2].trim());
+        }
+      }
+
       const textWalker = document.createTreeWalker(wysiwyg, NodeFilter.SHOW_TEXT, null);
       let textNode;
       const varRegex = /\{\{var:\s*([^=}]+)=([^}]+)\}\}/g;
@@ -102,6 +347,7 @@ export class InlineTagPlugin {
 
       for (const node of nodesToReplace) {
         const text = node.textContent || '';
+        mainRegex.lastIndex = 0;
         if (!mainRegex.test(text)) continue;
 
         mainRegex.lastIndex = 0;
@@ -120,15 +366,7 @@ export class InlineTagPlugin {
           const content = match[2];
 
           if (type === 'embed') {
-             // Create a block element for embed
-             const embedDiv = document.createElement('div');
-             embedDiv.className = 'dj-embed';
-             embedDiv.setAttribute('contenteditable', 'false');
-             embedDiv.setAttribute('data-raw', match[0]);
-             
-             const contentDiv = document.createElement('div');
-             contentDiv.className = 'dj-embed-content';
-             embedDiv.appendChild(contentDiv);
+             const { embedDiv, contentDiv } = this.createEmbedNode(match[0], content, 0, true);
              fragment.appendChild(embedDiv);
 
              // Kick off load async
@@ -140,18 +378,21 @@ export class InlineTagPlugin {
              span.setAttribute('data-type', type);
              span.setAttribute('data-raw', match[0]);
              span.setAttribute('contenteditable', 'false');
+             span.setAttribute('data-editing', 'false');
 
-             const editSpan = document.createElement('span');
+             const editSpan = document.createElement('input');
              editSpan.className = 'dj-node-edit';
-             editSpan.setAttribute('contenteditable', 'true');
-             editSpan.textContent = match[0];
+             editSpan.type = 'text';
+             editSpan.spellcheck = false;
+             this.setNodeEditorValue(editSpan, match[0]);
              
+             this.bindNodeEditing(span, editSpan);
              span.appendChild(editSpan);
              fragment.appendChild(span);
 
              // Calculate result immediately
-             const result = await this.calculateResult(type, content);
-             span.setAttribute('data-result', result);
+             const result = await this.calculateDisplay(type, content);
+             this.applyNodeDisplay(span, result);
           }
 
           lastIndex = mainRegex.lastIndex;
@@ -165,44 +406,350 @@ export class InlineTagPlugin {
         }
       }
 
-      // Also update existing nodes if they were modified by the user
-      const existingNodes = wysiwyg.querySelectorAll('.dj-node');
-      existingNodes.forEach(async (nodeEl) => {
+      const existingNodes = Array.from(wysiwyg.querySelectorAll('.dj-node')) as HTMLElement[];
+      const stableNodes: Array<{ node: HTMLElement; type: 'ref' | 'calc'; content: string }> = [];
+
+      for (const nodeEl of existingNodes) {
+          if (nodeEl.getAttribute('data-editing') === 'true') {
+              continue;
+          }
+
           const editSpan = nodeEl.querySelector('.dj-node-edit');
-          if (editSpan) {
-              const currentText = editSpan.textContent || '';
-              const rawText = nodeEl.getAttribute('data-raw');
-              if (currentText !== rawText) {
-                  // User edited
-                  nodeEl.setAttribute('data-raw', currentText);
-                  mainRegex.lastIndex = 0;
-                  const match = mainRegex.exec(currentText);
-                  if (match) {
-                      nodeEl.className = `dj-node dj-${match[1]}`;
-                      nodeEl.setAttribute('data-type', match[1]);
-                      const result = await this.calculateResult(match[1], match[2]);
-                      nodeEl.setAttribute('data-result', result);
-                  } else {
-                      nodeEl.setAttribute('data-result', '...');
+          if (!editSpan) continue;
+
+          const currentText = this.normalizeRawText(this.getNodeEditorValue(editSpan as HTMLElement));
+          const rawText = this.normalizeRawText(nodeEl.getAttribute('data-raw') || '');
+          if (currentText !== rawText) {
+              nodeEl.setAttribute('data-raw', currentText);
+              mainRegex.lastIndex = 0;
+              const match = mainRegex.exec(currentText);
+              if (match) {
+                  if (match[1] === 'embed') {
+                      const { embedDiv, contentDiv } = this.createEmbedNode(currentText, match[2], 0, true);
+                      nodeEl.replaceWith(embedDiv);
+                      this.loadEmbed(match[2], contentDiv);
+                      continue;
                   }
+                  nodeEl.className = `dj-node dj-${match[1]}`;
+                  nodeEl.setAttribute('data-type', match[1]);
+                  const result = await this.calculateDisplay(match[1], match[2]);
+                  this.applyNodeDisplay(nodeEl, result);
               } else {
-                  // Text same, but value might have changed (e.g. calc re-evaluate due to global var update)
-                  const type = nodeEl.getAttribute('data-type');
-                  if (type === 'calc' || type === 'ref') {
-                      mainRegex.lastIndex = 0;
-                      const match = mainRegex.exec(currentText);
-                      if (match) {
-                          const result = await this.calculateResult(type, match[2]);
-                          nodeEl.setAttribute('data-result', result);
-                      }
-                  }
+                  this.applyNodeDisplay(nodeEl, { label: '', value: '...' });
+              }
+              continue;
+          }
+
+          const type = nodeEl.getAttribute('data-type');
+          if (type === 'ref' || type === 'calc') {
+              mainRegex.lastIndex = 0;
+              const match = mainRegex.exec(currentText);
+              if (match) {
+                  stableNodes.push({ node: nodeEl, type: type as 'ref' | 'calc', content: match[2] });
               }
           }
-      });
+      }
+
+      for (const item of stableNodes) {
+          if (item.type !== 'ref') continue;
+          const result = await this.calculateDisplay('ref', item.content);
+          this.applyNodeDisplay(item.node, result);
+      }
+
+      for (const item of stableNodes) {
+          if (item.type !== 'calc') continue;
+          const result = await this.calculateDisplay('calc', item.content);
+          this.applyNodeDisplay(item.node, result);
+      }
+
+      const existingEmbeds = Array.from(wysiwyg.querySelectorAll('.dj-embed')) as HTMLElement[];
+      for (const embedNode of existingEmbeds) {
+          if (embedNode.getAttribute('data-editing') === 'true') {
+              continue;
+          }
+
+          const editNode = embedNode.querySelector('.dj-embed-edit');
+          if (!editNode) {
+              continue;
+          }
+
+          const currentText = this.normalizeRawText(this.getEmbedEditorValue(editNode as HTMLElement));
+          const rawText = this.normalizeRawText(embedNode.getAttribute('data-raw') || '');
+          if (currentText && currentText !== rawText) {
+              this.syncEditedEmbed(embedNode, currentText);
+          }
+      }
 
     } finally {
-      setTimeout(() => { this.isProcessing = false; }, 0);
-    }
+      window.setTimeout(() => {
+        this.isProcessing = false;
+        if (this.hasPendingProcess) {
+          this.hasPendingProcess = false;
+          this.processDocument();
+        }
+      }, 0);
+      }
+  }
+
+  private syncEditedEmbed(embedNode: HTMLElement, rawText: string) {
+      const pathWithAnchor = this.parseEmbedPath(rawText);
+      if (!pathWithAnchor) {
+          embedNode.setAttribute('data-raw', rawText);
+          embedNode.setAttribute('data-invalid', 'true');
+          const errorNode = embedNode.querySelector('.dj-embed-error');
+          if (errorNode) {
+              errorNode.textContent = 'Invalid embed syntax. Use {{embed: path}} or {{embed: path#heading}}.';
+          }
+          return false;
+      }
+
+      const depth = Number.parseInt(embedNode.getAttribute('data-depth') || '0', 10) || 0;
+      const editable = embedNode.getAttribute('data-editable') === 'true';
+      const { embedDiv, contentDiv } = this.createEmbedNode(rawText, pathWithAnchor, depth, editable);
+      embedNode.replaceWith(embedDiv);
+      this.loadEmbed(pathWithAnchor, contentDiv, depth);
+      return true;
+  }
+
+  private renderEmbedSuggestions(
+      rawText: string,
+      suggestionsHost: HTMLElement,
+      state: EmbedSuggestionState,
+      onPick: (path: string) => void
+  ) {
+      suggestionsHost.innerHTML = '';
+      if (state.suggestions.length === 0) {
+          suggestionsHost.hidden = true;
+          return;
+      }
+
+      const currentPath = this.parseEmbedPath(rawText)?.split('#')[0]?.trim() || '';
+
+      state.suggestions.forEach((path, index) => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'dj-embed-suggestion';
+          if (index === state.selectedIndex) {
+              button.classList.add('is-active');
+          }
+          button.textContent = path;
+          button.title = path;
+          if (path === currentPath) {
+              button.classList.add('is-current');
+          }
+          button.addEventListener('mousedown', (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onPick(path);
+          });
+          suggestionsHost.appendChild(button);
+      });
+
+      suggestionsHost.hidden = false;
+  }
+
+  private createEmbedNode(raw: string, pathWithAnchor: string, depth = 0, editable = true) {
+      const [rawPath, rawAnchor] = pathWithAnchor.split('#');
+      const path = rawPath.trim();
+      const anchor = rawAnchor?.trim();
+
+      const embedDiv = document.createElement('div');
+      embedDiv.className = depth > 0 ? 'dj-embed dj-embed-nested' : 'dj-embed';
+      embedDiv.setAttribute('contenteditable', 'false');
+      embedDiv.setAttribute('data-raw', raw);
+      embedDiv.setAttribute('data-depth', String(depth));
+      embedDiv.setAttribute('data-editable', editable ? 'true' : 'false');
+      embedDiv.setAttribute('data-editing', 'false');
+      embedDiv.setAttribute('data-invalid', 'false');
+
+      const headerDiv = document.createElement('div');
+      headerDiv.className = 'dj-embed-header';
+
+      const metaDiv = document.createElement('div');
+      metaDiv.className = 'dj-embed-meta';
+
+      const labelSpan = document.createElement('span');
+      labelSpan.className = 'dj-embed-label';
+      labelSpan.textContent = anchor ? 'Embedded block' : 'Embedded document';
+
+      const sourceButton = document.createElement('button');
+      sourceButton.type = 'button';
+      sourceButton.className = 'dj-embed-source';
+      sourceButton.textContent = anchor ? `${path}#${anchor}` : path;
+      sourceButton.title = editable ? 'Click to edit embed source' : sourceButton.textContent;
+
+      metaDiv.appendChild(labelSpan);
+      metaDiv.appendChild(sourceButton);
+
+      const actionGroup = document.createElement('div');
+      actionGroup.className = 'dj-embed-actions';
+
+      const openButton = document.createElement('button');
+      openButton.type = 'button';
+      openButton.className = 'dj-embed-open';
+      openButton.textContent = anchor ? 'Open block' : 'Open doc';
+      openButton.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.onEmbedNavigate(path, anchor);
+      });
+
+      actionGroup.appendChild(openButton);
+      headerDiv.appendChild(metaDiv);
+      headerDiv.appendChild(actionGroup);
+
+      const editDiv = document.createElement('input');
+      editDiv.className = 'dj-embed-edit';
+      editDiv.type = 'text';
+      editDiv.spellcheck = false;
+      editDiv.disabled = !editable;
+      this.setEmbedEditorValue(editDiv, raw);
+
+      const suggestionsDiv = document.createElement('div');
+      suggestionsDiv.className = 'dj-embed-suggestions';
+      suggestionsDiv.hidden = true;
+
+      const errorDiv = document.createElement('div');
+      errorDiv.className = 'dj-embed-error';
+
+      const contentDiv = document.createElement('div');
+      contentDiv.className = 'dj-embed-content dj-markdown';
+
+      if (editable) {
+          let suggestionState: EmbedSuggestionState = { suggestions: [], selectedIndex: -1 };
+          let blurTimer: number | null = null;
+          const pickSuggestion = (selectedPath: string) => {
+              const currentRaw = this.normalizeRawText(this.getEmbedEditorValue(editDiv));
+              const nextRaw = this.applyEmbedSuggestion(currentRaw, selectedPath);
+              this.setEmbedEditorValue(editDiv, nextRaw);
+              suggestionState = this.getEmbedSuggestions(nextRaw);
+              this.renderEmbedSuggestions(nextRaw, suggestionsDiv, suggestionState, pickSuggestion);
+              this.focusEmbedEditor(editDiv);
+          };
+
+          const refreshSuggestions = () => {
+              const currentRaw = this.normalizeRawText(this.getEmbedEditorValue(editDiv));
+              embedDiv.setAttribute('data-raw', currentRaw || raw);
+              embedDiv.setAttribute('data-invalid', 'false');
+              errorDiv.textContent = '';
+              suggestionState = this.getEmbedSuggestions(currentRaw);
+              this.renderEmbedSuggestions(currentRaw, suggestionsDiv, suggestionState, pickSuggestion);
+          };
+
+          const beginEditing = () => {
+              embedDiv.setAttribute('data-editing', 'true');
+              this.setEmbedEditorValue(editDiv, embedDiv.getAttribute('data-raw') || raw);
+              refreshSuggestions();
+              this.focusEmbedEditor(editDiv);
+          };
+
+          const commitEditing = () => {
+              if (blurTimer !== null) {
+                  window.clearTimeout(blurTimer);
+                  blurTimer = null;
+              }
+              embedDiv.setAttribute('data-editing', 'false');
+              suggestionsDiv.hidden = true;
+              const currentRaw = this.normalizeRawText(this.getEmbedEditorValue(editDiv));
+              if (!currentRaw) {
+                  this.setEmbedEditorValue(editDiv, embedDiv.getAttribute('data-raw') || raw);
+                  return;
+              }
+              const synced = this.syncEditedEmbed(embedDiv, currentRaw);
+              if (!synced) {
+                  embedDiv.setAttribute('data-editing', 'true');
+                  this.focusEmbedEditor(editDiv);
+              }
+          };
+
+          sourceButton.addEventListener('click', (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              beginEditing();
+          });
+
+          editDiv.addEventListener('focus', () => {
+              embedDiv.setAttribute('data-editing', 'true');
+              refreshSuggestions();
+          });
+
+          editDiv.addEventListener('input', () => {
+              refreshSuggestions();
+          });
+
+          editDiv.addEventListener('keydown', (event) => {
+              if (event.key === 'Escape') {
+                  event.preventDefault();
+                  embedDiv.setAttribute('data-editing', 'false');
+                  suggestionsDiv.hidden = true;
+                  this.setEmbedEditorValue(editDiv, embedDiv.getAttribute('data-raw') || raw);
+                  editDiv.blur();
+                  return;
+              }
+
+              if (event.key === 'ArrowDown' && suggestionState.suggestions.length > 0) {
+                  event.preventDefault();
+                  suggestionState.selectedIndex =
+                      (suggestionState.selectedIndex + 1) % suggestionState.suggestions.length;
+                  this.renderEmbedSuggestions(
+                      this.normalizeRawText(this.getEmbedEditorValue(editDiv)),
+                      suggestionsDiv,
+                      suggestionState,
+                      pickSuggestion
+                  );
+                  return;
+              }
+
+              if (event.key === 'ArrowUp' && suggestionState.suggestions.length > 0) {
+                  event.preventDefault();
+                  suggestionState.selectedIndex =
+                      (suggestionState.selectedIndex - 1 + suggestionState.suggestions.length) %
+                      suggestionState.suggestions.length;
+                  this.renderEmbedSuggestions(
+                      this.normalizeRawText(this.getEmbedEditorValue(editDiv)),
+                      suggestionsDiv,
+                      suggestionState,
+                      pickSuggestion
+                  );
+                  return;
+              }
+
+              if (event.key === 'Enter') {
+                  if (suggestionState.selectedIndex >= 0 && suggestionState.suggestions[suggestionState.selectedIndex]) {
+                      event.preventDefault();
+                      const nextRaw = this.applyEmbedSuggestion(
+                          this.normalizeRawText(this.getEmbedEditorValue(editDiv)),
+                          suggestionState.suggestions[suggestionState.selectedIndex]
+                      );
+                      this.setEmbedEditorValue(editDiv, nextRaw);
+                      suggestionState = this.getEmbedSuggestions(nextRaw);
+                      this.renderEmbedSuggestions(nextRaw, suggestionsDiv, suggestionState, pickSuggestion);
+                      return;
+                  }
+
+                  event.preventDefault();
+                  editDiv.blur();
+              }
+          });
+
+          editDiv.addEventListener('blur', () => {
+              blurTimer = window.setTimeout(() => {
+                  commitEditing();
+              }, 120);
+          });
+      } else {
+          sourceButton.disabled = true;
+      }
+
+      embedDiv.appendChild(headerDiv);
+      if (editable) {
+          embedDiv.appendChild(editDiv);
+          embedDiv.appendChild(suggestionsDiv);
+          embedDiv.appendChild(errorDiv);
+      }
+      embedDiv.appendChild(contentDiv);
+
+      return { embedDiv, contentDiv };
   }
 
   private async loadEmbed(pathWithAnchor: string, container: HTMLElement, depth: number = 0) {
@@ -232,7 +779,11 @@ export class InlineTagPlugin {
           // Process nested tags inside the embed!
           // We can just create a temporary div and reuse our main tag parsing logic,
           // but that would mutate the innerHTML. Since we just injected it, it's safe.
-          this.processNodesSync(container, depth + 1);
+          const embedVarMap = new Map<string, string>();
+          for (const variable of MarkdownParser.parseVariables(finalContent)) {
+            embedVarMap.set(variable.name, variable.value);
+          }
+          this.processNodesSync(container, depth + 1, embedVarMap, path);
 
       } catch {
           container.innerHTML = `<span class="text-red-500 italic">Error loading embed: ${path}</span>`;
@@ -240,7 +791,7 @@ export class InlineTagPlugin {
   }
 
   // A synchronous or scoped version of node processing just for rendering inner content of embeds
-  private processNodesSync(root: HTMLElement, currentDepth: number) {
+  private processNodesSync(root: HTMLElement, currentDepth: number, localVarMap?: Map<string, string>, sourcePath?: string) {
       // Very similar to processDocument but without mutating the main editor DOM state
       // Just plain regex replace on text nodes.
       const nodesToReplace: Text[] = [];
@@ -263,6 +814,7 @@ export class InlineTagPlugin {
 
       for (const node of nodesToReplace) {
         const text = node.textContent || '';
+        mainRegex.lastIndex = 0;
         if (!mainRegex.test(text)) continue;
 
         mainRegex.lastIndex = 0;
@@ -281,11 +833,7 @@ export class InlineTagPlugin {
           const content = match[2];
 
           if (type === 'embed') {
-             const embedDiv = document.createElement('div');
-             embedDiv.className = 'dj-embed ml-4 border-l-2 border-blue-200 pl-4'; // Add indentation for nested
-             const contentDiv = document.createElement('div');
-             contentDiv.className = 'dj-embed-content';
-             embedDiv.appendChild(contentDiv);
+             const { embedDiv, contentDiv } = this.createEmbedNode(match[0], content, currentDepth, false);
              fragment.appendChild(embedDiv);
 
              // Recursive load
@@ -296,12 +844,12 @@ export class InlineTagPlugin {
              span.setAttribute('data-type', type);
              
              // In read-only mode (inside embed), we just show the pill, no edit span
-             span.setAttribute('data-result', '...'); 
+             this.applyNodeDisplay(span, { label: '', value: '...' });
              fragment.appendChild(span);
 
              // Calculate result
-             this.calculateResult(type, content).then(result => {
-                 span.setAttribute('data-result', result);
+             this.calculateDisplay(type, content, localVarMap, sourcePath).then(result => {
+                 this.applyNodeDisplay(span, result);
              });
           }
 
@@ -317,48 +865,76 @@ export class InlineTagPlugin {
       }
   }
 
-  private async calculateResult(type: string, content: string): Promise<string> {
+  private async calculateDisplay(type: string, content: string, localVarMap?: Map<string, string>, sourcePath?: string): Promise<InlineNodeDisplay> {
       if (type === 'var') {
           const parts = content.split('=');
-          if (parts.length >= 2) return `饾憮 ${parts[0].trim()} = ${parts.slice(1).join('=').trim()}`;
-          return content;
+          if (parts.length >= 2) {
+              const name = parts[0].trim();
+              const value = parts.slice(1).join('=').trim();
+              if (localVarMap) {
+                localVarMap.set(name, value);
+              } else {
+                this.globalVarMap.set(name, value);
+              }
+              return { label: name, value };
+          }
+          return { label: '', value: content.trim() };
       }
       
       if (type === 'ref') {
           const parts = content.split('::');
           const path = parts.length > 1 ? parts[0].trim() : '.';
           const varName = parts.length > 1 ? parts[1].trim() : parts[0].trim();
+          const isLocalPath = path === '.' || !path || (sourcePath ? path === sourcePath : path === this.currentPath);
           
-          if (path === '.' || path === this.currentPath || !path) {
-              return `鈫?${this.globalVarMap.get(varName) || '?'}`;
+          if (isLocalPath) {
+              const localValue = localVarMap?.get(varName);
+              const globalValue = this.globalVarMap.get(varName);
+              const resolved = localValue ?? globalValue ?? '?';
+              if (resolved !== '?') {
+                if (localVarMap) {
+                  localVarMap.set(varName, resolved);
+                }
+                this.globalVarMap.set(varName, resolved);
+              }
+              return { label: varName, value: resolved };
           } else {
              try {
                 const fileContent = await fileService.readFile(path, this.currentWorkspace);
                 const vars = MarkdownParser.parseVariables(fileContent);
                 const found = vars.find(v => v.name === varName);
                 if (found) {
-                   return `鈫?${found.value}`;
+                   if (localVarMap) {
+                     localVarMap.set(varName, found.value);
+                   }
+                   this.globalVarMap.set(varName, found.value);
+                   return { label: varName, value: found.value };
                 }
              } catch {
-                return `鈫??`;
+                return { label: varName, value: '?' };
              }
-             return `鈫??`;
+             return { label: varName, value: '?' };
           }
       }
 
       if (type === 'calc') {
           let expr = content;
-          for (const [k, v] of this.globalVarMap.entries()) {
+          const mergedVars = new Map(this.globalVarMap);
+          if (localVarMap) {
+            for (const [k, v] of localVarMap.entries()) {
+              mergedVars.set(k, v);
+            }
+          }
+          for (const [k, v] of mergedVars.entries()) {
               expr = expr.replace(new RegExp(`\\b${k}\\b`, 'g'), v);
           }
           try {
               const res = new Function('return ' + expr)();
-              return `鈭?${res}`;
+              return { label: '', value: String(res) };
           } catch {
-              return 'calc error';
+              return { label: '', value: 'NaN' };
           }
       }
-      return content;
+      return { label: '', value: content.trim() };
   }
 }
-
