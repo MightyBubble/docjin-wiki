@@ -300,6 +300,10 @@ body {
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
 }
 
+.dj-embed-suggestions[hidden] {
+  display: none !important;
+}
+
 .dj-embed-suggestion {
   width: 100%;
   border: 0;
