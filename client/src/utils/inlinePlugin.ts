@@ -310,6 +310,29 @@ export class InlineTagPlugin {
     return match ? match[1].trim() : null;
   }
 
+  private embedPathExists(pathWithAnchor: string): boolean {
+    const [rawPath] = pathWithAnchor.split('#');
+    const path = rawPath.trim();
+    if (!path) {
+      return false;
+    }
+
+    return this.availableFilePaths.includes(path);
+  }
+
+  private getEmbedValidationMessage(rawText: string): string | null {
+    const pathWithAnchor = this.parseEmbedPath(rawText);
+    if (!pathWithAnchor) {
+      return 'Invalid embed syntax. Use {{embed: path}} or {{embed: path#heading}}.';
+    }
+
+    if (!this.embedPathExists(pathWithAnchor)) {
+      return `Embed source not found: ${pathWithAnchor.split('#')[0].trim()}`;
+    }
+
+    return null;
+  }
+
   private findStandaloneEmbedHost(node: Text, rawText: string): HTMLElement | null {
     const paragraph = node.parentElement?.closest('p');
     if (!paragraph) {
@@ -577,12 +600,13 @@ export class InlineTagPlugin {
 
   private syncEditedEmbed(embedNode: HTMLElement, rawText: string) {
       const pathWithAnchor = this.parseEmbedPath(rawText);
-      if (!pathWithAnchor) {
+      const validationMessage = this.getEmbedValidationMessage(rawText);
+      if (!pathWithAnchor || validationMessage) {
           embedNode.setAttribute('data-raw', rawText);
           embedNode.setAttribute('data-invalid', 'true');
           const errorNode = embedNode.querySelector('.dj-embed-error');
           if (errorNode) {
-              errorNode.textContent = 'Invalid embed syntax. Use {{embed: path}} or {{embed: path#heading}}.';
+              errorNode.textContent = validationMessage;
           }
           return false;
       }
@@ -717,9 +741,10 @@ export class InlineTagPlugin {
 
           const refreshSuggestions = () => {
               const currentRaw = this.normalizeRawText(this.getEmbedEditorValue(editDiv));
+              const validationMessage = this.getEmbedValidationMessage(currentRaw);
               embedDiv.setAttribute('data-raw', currentRaw || raw);
-              embedDiv.setAttribute('data-invalid', 'false');
-              errorDiv.textContent = '';
+              embedDiv.setAttribute('data-invalid', validationMessage ? 'true' : 'false');
+              errorDiv.textContent = validationMessage || '';
               suggestionState = this.getEmbedSuggestions(currentRaw);
               this.renderEmbedSuggestions(currentRaw, suggestionsDiv, suggestionState, pickSuggestion);
           };

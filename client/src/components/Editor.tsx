@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useEffectEvent, useRef, useState } from 'react';
 import Vditor from 'vditor';
 import 'vditor/dist/index.css';
 import type { FileNode, FileFocusTarget } from '../types';
@@ -16,6 +16,7 @@ interface EditorProps {
 }
 
 const FOCUS_HIGHLIGHT_CLASS = 'dj-focus-target';
+const PLUGIN_REFRESH_DELAYS = [0, 40, 120, 260] as const;
 
 const normalizeHeadingText = (value: string | null | undefined): string =>
   (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -68,19 +69,19 @@ export const Editor: React.FC<EditorProps> = ({
     }
   }, [file?.path]);
 
-  const clearScheduledRefreshes = useCallback(() => {
+  const clearScheduledRefreshes = useEffectEvent(() => {
     refreshTimerRefs.current.forEach((timerId) => window.clearTimeout(timerId));
     refreshTimerRefs.current = [];
-  }, []);
+  });
 
-  const schedulePluginRefresh = useCallback((delays: number[] = [0, 40, 120, 260]) => {
+  const schedulePluginRefresh = useEffectEvent((delays: readonly number[] = PLUGIN_REFRESH_DELAYS) => {
     clearScheduledRefreshes();
     refreshTimerRefs.current = delays.map((delay) =>
       window.setTimeout(() => {
         pluginRef.current?.refresh();
       }, delay)
     );
-  }, [clearScheduledRefreshes]);
+  });
 
   // ---- Vditor initialisation (once) ----
   useEffect(() => {
@@ -144,7 +145,7 @@ export const Editor: React.FC<EditorProps> = ({
       }
       setVditor(undefined);
     };
-  }, [clearScheduledRefreshes, schedulePluginRefresh]);
+  }, []);
 
   // ---- Sync file content → Vditor ----
   useEffect(() => {
@@ -164,7 +165,7 @@ export const Editor: React.FC<EditorProps> = ({
         lastFileIdRef.current = null;
       }
     }
-  }, [file, schedulePluginRefresh, vditor]);
+  }, [file, vditor]);
 
   useEffect(() => {
     if (!focusTarget || !file || !vditor) return;
@@ -243,7 +244,7 @@ export const Editor: React.FC<EditorProps> = ({
       window.clearTimeout(focusCleanupTimerRef.current);
     }
     clearScheduledRefreshes();
-  }, [clearScheduledRefreshes]);
+  }, []);
 
   return (
     <div className="flex-1 flex h-full overflow-hidden relative">
