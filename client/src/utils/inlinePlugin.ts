@@ -144,6 +144,18 @@ export class InlineTagPlugin {
     }, 0);
   }
 
+  private parseInlineNodeRaw(rawText: string): { type: string; content: string } | null {
+    const match = this.normalizeRawText(rawText).match(/^\{\{(var|calc|ref):\s*([^}]+)\}\}$/);
+    if (!match) {
+      return null;
+    }
+
+    return {
+      type: match[1],
+      content: match[2],
+    };
+  }
+
   private beginNodeEditing(span: HTMLElement, editNode: HTMLElement) {
     span.setAttribute('data-editing', 'true');
     span.setAttribute('contenteditable', 'false');
@@ -156,12 +168,22 @@ export class InlineTagPlugin {
       this.setNodeEditorValue(editNode, span.getAttribute('data-raw') || '');
     }
 
+    const currentText = this.normalizeRawText(this.getNodeEditorValue(editNode));
+    if (!options?.revert && (!currentText || !this.parseInlineNodeRaw(currentText))) {
+      span.setAttribute('data-editing', 'true');
+      span.setAttribute('contenteditable', 'false');
+      this.focusEditableNode(editNode);
+      return false;
+    }
+
     span.setAttribute('data-editing', 'false');
     span.setAttribute('contenteditable', 'false');
 
     window.setTimeout(() => {
       this.refresh();
     }, 0);
+
+    return true;
   }
 
   private isolateEditorInput(inputNode: HTMLElement) {
@@ -227,8 +249,9 @@ export class InlineTagPlugin {
 
       if (event.key === 'Enter') {
         event.preventDefault();
-        this.finishNodeEditing(span, editNode);
-        editNode.blur();
+        if (this.finishNodeEditing(span, editNode)) {
+          editNode.blur();
+        }
       }
     });
 
@@ -285,6 +308,32 @@ export class InlineTagPlugin {
   private parseEmbedPath(rawText: string): string | null {
     const match = rawText.match(/^\{\{embed:\s*([^}]+)\}\}$/);
     return match ? match[1].trim() : null;
+  }
+
+  private findStandaloneEmbedHost(node: Text, rawText: string): HTMLElement | null {
+    const paragraph = node.parentElement?.closest('p');
+    if (!paragraph) {
+      return null;
+    }
+
+    const normalizedBlockText = this.normalizeRawText(paragraph.textContent || '');
+    if (normalizedBlockText !== this.normalizeRawText(rawText)) {
+      return null;
+    }
+
+    return paragraph as HTMLElement;
+  }
+
+  private replaceStandaloneEmbed(
+    host: HTMLElement,
+    rawText: string,
+    pathWithAnchor: string,
+    depth: number,
+    editable: boolean
+  ) {
+    const { embedDiv, contentDiv } = this.createEmbedNode(rawText, pathWithAnchor, depth, editable);
+    host.replaceWith(embedDiv);
+    this.loadEmbed(pathWithAnchor, contentDiv, depth);
   }
 
   private getEmbedSuggestions(rawText: string): EmbedSuggestionState {
@@ -375,6 +424,13 @@ export class InlineTagPlugin {
 
       for (const node of nodesToReplace) {
         const text = node.textContent || '';
+        const standalonePath = this.parseEmbedPath(this.normalizeRawText(text));
+        const standaloneHost = standalonePath ? this.findStandaloneEmbedHost(node, text) : null;
+        if (standalonePath && standaloneHost) {
+          this.replaceStandaloneEmbed(standaloneHost, this.normalizeRawText(text), standalonePath, 0, true);
+          continue;
+        }
+
         mainRegex.lastIndex = 0;
         if (!mainRegex.test(text)) continue;
 
@@ -584,6 +640,9 @@ export class InlineTagPlugin {
       const embedDiv = document.createElement('div');
       embedDiv.className = depth > 0 ? 'dj-embed dj-embed-nested' : 'dj-embed';
       embedDiv.setAttribute('contenteditable', 'false');
+      if (editable && depth === 0) {
+          embedDiv.setAttribute('data-block', '0');
+      }
       embedDiv.setAttribute('data-raw', raw);
       embedDiv.setAttribute('data-depth', String(depth));
       embedDiv.setAttribute('data-editable', editable ? 'true' : 'false');
@@ -858,6 +917,13 @@ export class InlineTagPlugin {
 
       for (const node of nodesToReplace) {
         const text = node.textContent || '';
+        const standalonePath = this.parseEmbedPath(this.normalizeRawText(text));
+        const standaloneHost = standalonePath ? this.findStandaloneEmbedHost(node, text) : null;
+        if (standalonePath && standaloneHost) {
+          this.replaceStandaloneEmbed(standaloneHost, this.normalizeRawText(text), standalonePath, currentDepth, false);
+          continue;
+        }
+
         mainRegex.lastIndex = 0;
         if (!mainRegex.test(text)) continue;
 
